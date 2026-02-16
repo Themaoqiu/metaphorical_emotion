@@ -1,44 +1,29 @@
 from __future__ import annotations
 
-import argparse
 import asyncio
 import json
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, List, Optional, Union
 
-from api_sync import StreamGenerator
+import fire
+
+from api_sync.api import StreamGenerator
 from api_sync.utils.parser import JSONParser
 
-FINAL_JSONL_FIELDS = [
-    "record_id",
-    "image_path",
-    "text",
-    "is_metaphor",
-    "metaphor_path",
-    "emotion_type",
-    "image_description",
-    "problem",
-    "options",
-    "answer",
-    "think",
-]
-
 EXAMPLE_RECORD = {
-    "record_id": "multimeme_EN_000001",
     "image_path": "/abs/path/to/image.jpg",
     "text": "Original text from dataset",
     "is_metaphor": True,
     "metaphor_path": "sequential",
-    "emotion_type": "positive",
-    "image_description": "A smiling person holding a trophy.",
-    "problem": "这张图片表达什么情感？",
-    "options": ["negative", "neutral", "positive"],
-    "answer": "positive",
-    "think": "图片中的成功场景与文本一起暗示积极情感。",
+    "emotion_type": "love",
+    "caption": "",
+    "think": "",
 }
+
+SYSTEM_PROMPT = "You are a careful multimodal annotator. Return valid JSON only."
 
 
 @dataclass
@@ -49,300 +34,239 @@ class AnnotatorConfig:
     api_keys: List[str]
     max_concurrent_per_key: int = 50
     max_retries: int = 5
-    rational: bool = False
+    limit: int = 0
+
+
+def parse_api_keys(value: Optional[str]) -> List[str]:
+    if value:
+        return [item.strip() for item in value.split(",") if item.strip()]
+    env_value = os.getenv("MM_API_KEYS") or os.getenv("API_KEYS") or os.getenv("OPENAI_API_KEY")
+    if not env_value:
+        raise ValueError("API keys not provided. Use --api_keys or set MM_API_KEYS/API_KEYS.")
+    return [item.strip() for item in env_value.split(",") if item.strip()]
 
 
 class BaseAnnotator(ABC):
-    def __init__(self, config: AnnotatorConfig) -> None:
+    def __init__(self, config: AnnotatorConfig, image_root: Optional[Path] = None) -> None:
         self.config = config
+        self.image_root = image_root
         self.stream = StreamGenerator(
             model_name=config.model_name,
             api_keys=config.api_keys,
             max_concurrent_per_key=config.max_concurrent_per_key,
             max_retries=config.max_retries,
-            rational=config.rational,
+            rational=False,
             with_unique_id=True,
         )
 
-    @property
+
     @abstractmethod
-    def system_prompt(self) -> str:
+    def extract_fields(self, record: Dict[str, Any]) -> Dict[str, Any]:
         raise NotImplementedError
 
     @abstractmethod
-    def build_prompt(self, record: Dict[str, Any]) -> Union[str, List[Dict[str, Any]]]:
+    def build_prompt(self, fields: Dict[str, Any]) -> str:
         raise NotImplementedError
 
     @abstractmethod
-    def build_output_record(self, record: Dict[str, Any], annotation: Dict[str, Any]) -> Dict[str, Any]:
+    def build_output_record(self, fields: Dict[str, Any], annotation: Dict[str, Any]) -> Dict[str, Any]:
         raise NotImplementedError
-
-    def handle_error_record(self, record: Dict[str, Any], response: str) -> Dict[str, Any]:
-        output = self.build_output_record(record, {})
-        output["annotation_error"] = "parse_failed"
-        output["raw_response"] = response
-        return output
 
     def load_records(self) -> List[Dict[str, Any]]:
         records: List[Dict[str, Any]] = []
         with self.config.input_path.open("r", encoding="utf-8") as handle:
             for line in handle:
                 line = line.strip()
-                if not line:
-                    continue
-                records.append(json.loads(line))
+                if line:
+                    records.append(json.loads(line))
+                if self.config.limit > 0 and len(records) >= self.config.limit:
+                    break
         return records
 
-    def _build_prompts(self, records: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        prompts: List[Dict[str, Any]] = []
-        for idx, record in enumerate(records):
-            prompts.append({
-                "id": str(idx),
-                "prompt": self.build_prompt(record),
-            })
-        return prompts
-
-    def _validate_response(self, response: str) -> Optional[Dict[str, Any]]:
+    def _parse_annotation(self, response: Any) -> Optional[Dict[str, Any]]:
         if isinstance(response, dict):
             return response
-        return JSONParser.parse(response)
+        return JSONParser.parse(str(response))
 
-    async def _run_async(self, records: Sequence[Dict[str, Any]]) -> None:
-        prompts = self._build_prompts(records)
-        self.config.output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        with self.config.output_path.open("w", encoding="utf-8") as handle:
-            async for result in self.stream.generate_stream(
-                prompts=prompts,
-                system_prompt=self.system_prompt,
-                validate_func=self._validate_response,
-            ):
-                record_index = int(result["id"])
-                record = records[record_index]
-                response = result["result"]
-
-                if isinstance(response, dict):
-                    annotation = response
-                else:
-                    annotation = self._validate_response(response)
-
-                if annotation is None:
-                    output_record = self.handle_error_record(record, str(response))
-                else:
-                    output_record = self.build_output_record(record, annotation)
-
-                handle.write(json.dumps(output_record, ensure_ascii=False) + "\n")
-
-    def run(self) -> None:
-        records = self.load_records()
-        asyncio.run(self._run_async(records))
-
-
-def parse_api_keys(value: Optional[str]) -> List[str]:
-    if value:
-        return [item.strip() for item in value.split(",") if item.strip()]
-    env_value = (
-        os.getenv("MM_API_KEYS")
-        or os.getenv("API_KEYS")
-        or os.getenv("OPENAI_API_KEY")
-    )
-    if not env_value:
-        raise ValueError("API keys not provided. Use --api-keys or set MM_API_KEYS/API_KEYS.")
-    return [item.strip() for item in env_value.split(",") if item.strip()]
-
-
-def _first_value(record: Dict[str, Any], keys: Sequence[str]) -> Optional[Any]:
-    for key in keys:
-        if key in record and record[key] not in (None, ""):
-            return record[key]
-    return None
-
-
-class MultiMemeAnnotator(BaseAnnotator):
-    DATASET_NAME = "multimeme"
-    PROBLEM = "这张图片表达什么情感？"
-    EMOTION_OPTIONS = ("negative", "neutral", "positive")
-    SYSTEM_PROMPT = "你是一个严谨的多模态标注助手，输出必须是JSON。"
-    PROMPT_TEMPLATE = (
-        "你将看到一张图片及其文本信息。\n"
-        "文本: {text}\n"
-        "情感类别: {sentiment_category}\n"
-        "{offensiveness_block}"
-        "任务: \n"
-        "1. 用一句话客观描述图片内容。\n"
-        "2. 判断隐喻理解路径，选择 direct / sequential / parallel 之一。\n"
-        "   - direct: 直接从图像或文本得到隐喻含义。\n"
-        "   - sequential: 先理解字面内容，再推导隐喻含义。\n"
-        "   - parallel: 图文线索并行互相提示隐喻含义。\n"
-        "如果不是隐喻，请输出 direct。\n"
-        "仅输出JSON，格式如下: {\"image_description\": \"...\", \"metaphor_path\": \"direct\"}"
-    )
-
-    def __init__(self, *args, image_root: Optional[Path] = None, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self.image_root = Path(image_root) if image_root else None
-
-    @property
-    def system_prompt(self) -> str:
-        return self.SYSTEM_PROMPT
-
-    def resolve_image_path(self, record: Dict[str, Any]) -> Optional[Path]:
-        image_value = _first_value(
-            record,
-            ["image_path", "images_name", "Pic_id", "image", "path"],
-        )
-        if image_value is None:
-            return None
-        image_path = Path(str(image_value))
-        if not image_path.is_absolute() and self.image_root:
-            image_path = self.image_root / image_path
-        return image_path
-
-    def extract_text(self, record: Dict[str, Any]) -> str:
-        value = _first_value(record, ["text", "Text"])
-        return str(value) if value is not None else ""
-
-    def extract_sentiment_category(self, record: Dict[str, Any]) -> Optional[str]:
-        value = _first_value(record, ["sentiment category", "sentiment_category", "SentimentCategory"])
-        if value is None:
-            return None
-        return str(value)
-
-    def extract_intention_detection(self, record: Dict[str, Any]) -> Optional[str]:
-        value = _first_value(record, ["intention detection", "intention_detection", "IntentionDetection"])
-        if value is None:
-            return None
-        return str(value)
-
-    def extract_offensiveness_degree(self, record: Dict[str, Any]) -> Optional[str]:
-        value = _first_value(
-            record,
-            [
-                "offensiveness degree",
-                "offensiveness_degree",
-                "offensiveness detection",
-                "offensiveness_detection",
-            ],
-        )
-        if value is None:
-            return None
-        return str(value)
-
-    def extract_metaphor_occurrence(self, record: Dict[str, Any]) -> Optional[str]:
-        value = _first_value(record, ["metaphor occurrence", "metaphor_occurrence", "MetaphorOccurrence"])
-        if value is None:
-            return None
-        return str(value)
-
-    def is_offensive(self, intention_detection: Optional[str]) -> bool:
-        if not intention_detection:
-            return False
-        return "offensive" in intention_detection.lower()
-
-    def normalize_emotion(self, sentiment_category: Optional[str]) -> Optional[str]:
-        if sentiment_category is None:
-            return None
-        normalized = sentiment_category.strip().lower()
-        if normalized in {"1", "1.0", "positive", "pos"}:
-            return "positive"
-        if normalized in {"0", "0.0", "neutral", "neu"}:
-            return "neutral"
-        if normalized in {"-1", "-1.0", "negative", "neg"}:
-            return "negative"
-        if "(" in normalized and ")" in normalized:
-            start = normalized.find("(")
-            end = normalized.find(")", start + 1)
-            if start != -1 and end != -1:
-                return normalized[start + 1:end]
-        return sentiment_category
-
-    def normalize_metaphor_occurrence(self, metaphor_occurrence: Optional[str]) -> Optional[bool]:
-        if metaphor_occurrence is None:
-            return None
-        value = metaphor_occurrence.strip().lower()
-        if value in {"1", "true", "yes"}:
-            return True
-        if value in {"0", "false", "no"}:
-            return False
-        return None
-
-    def build_prompt_text(self, record: Dict[str, Any]) -> str:
-        text = self.extract_text(record)
-        sentiment_category = self.extract_sentiment_category(record) or ""
-        intention_detection = self.extract_intention_detection(record)
-        offensiveness_degree = self.extract_offensiveness_degree(record)
-
-        offensiveness_block = ""
-        if self.is_offensive(intention_detection) and offensiveness_degree:
-            offensiveness_block = f"Offensiveness degree: {offensiveness_degree}\n"
-
-        return self.PROMPT_TEMPLATE.format(
-            text=text,
-            sentiment_category=sentiment_category,
-            offensiveness_block=offensiveness_block,
-        ).strip()
-
-    def build_prompt(self, record: Dict[str, Any]) -> Union[str, List[Dict[str, Any]]]:
-        prompt_text = self.build_prompt_text(record)
-        image_path = self.resolve_image_path(record)
+    def _build_prompt_payload(self, fields: Dict[str, Any]) -> Union[str, List[Dict[str, str]]]:
+        prompt = self.build_prompt(fields)
+        image_path = fields.get("image_path", "")
         if image_path:
             return [
                 {"type": "image", "image": str(image_path)},
-                {"type": "text", "text": prompt_text},
+                {"type": "text", "text": prompt},
             ]
-        return prompt_text
+        return prompt
 
-    def build_base_record(self, record: Dict[str, Any]) -> Dict[str, Any]:
-        image_path = self.resolve_image_path(record)
-        sentiment_category = self.extract_sentiment_category(record)
-        emotion_type = self.normalize_emotion(sentiment_category)
-        metaphor_occurrence = self.extract_metaphor_occurrence(record)
+    async def annotate(self) -> None:
+        records = self.load_records()
+        fields_by_idx: Dict[int, Dict[str, Any]] = {}
+        prompts: List[Dict[str, Any]] = []
 
-        base: Dict[str, Any] = {
-            "record_id": str(
-                _first_value(record, ["id", "image_id", "images_name", "Pic_id", "image_path"]) or ""
-            ),
-            "image_path": str(image_path) if image_path else "",
-            "text": self.extract_text(record),
-            "is_metaphor": self.normalize_metaphor_occurrence(metaphor_occurrence),
+        for idx, record in enumerate(records):
+            fields = self.extract_fields(record)
+            fields_by_idx[idx] = fields
+            # For datasets with explicit metaphor labels, only annotate metaphor samples.
+            if "is_metaphor" in fields and fields["is_metaphor"] is not True:
+                continue
+            prompts.append({"id": str(idx), "prompt": self._build_prompt_payload(fields)})
+
+        total_records = len(records)
+        total_to_annotate = len(prompts)
+        total_skipped = total_records - total_to_annotate
+        print(
+            f"[meta_generator] total={total_records}, "
+            f"to_annotate={total_to_annotate}, skipped={total_skipped}"
+        )
+
+        annotations_by_idx: Dict[int, Dict[str, Any]] = {}
+        parse_failed_by_idx: Dict[int, str] = {}
+        completed = 0
+
+        if prompts:
+            async for result in self.stream.generate_stream(
+                prompts=prompts,
+                system_prompt=SYSTEM_PROMPT,
+                validate_func=self._parse_annotation,
+            ):
+                idx = int(result["id"])
+                raw = result["result"]
+                parsed = self._parse_annotation(raw)
+                completed += 1
+                if parsed is None:
+                    annotations_by_idx[idx] = {}
+                    parse_failed_by_idx[idx] = str(raw)
+                else:
+                    annotations_by_idx[idx] = parsed
+
+                if completed % 50 == 0 or completed == total_to_annotate:
+                    print(f"[meta_generator] progress: {completed}/{total_to_annotate}")
+        else:
+            print("[meta_generator] no records require model annotation")
+
+        self.config.output_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.config.output_path.open("w", encoding="utf-8") as handle:
+            for idx in range(len(records)):
+                fields = fields_by_idx[idx]
+                annotation = annotations_by_idx.get(idx, {})
+                output = self.build_output_record(fields, annotation)
+                if idx in parse_failed_by_idx:
+                    output["annotation_error"] = "parse_failed"
+                    output["raw_response"] = parse_failed_by_idx[idx]
+                handle.write(json.dumps(output, ensure_ascii=False) + "\n")
+
+        parse_failed_count = len(parse_failed_by_idx)
+        success_count = total_to_annotate - parse_failed_count
+        print(
+            f"[meta_generator] done: success={success_count}, parse_failed={parse_failed_count}, "
+            f"skipped={total_skipped}, output={self.config.output_path}"
+        )
+
+    def run(self) -> None:
+        asyncio.run(self.annotate())
+
+
+class MetMemeAnnotator(BaseAnnotator):
+    SENTIMENT_ID_TO_LABEL = {
+        "1": "happiness",
+        "2": "love",
+        "3": "anger",
+        "4": "sorrow",
+        "5": "fear",
+        "6": "hate",
+        "7": "surprise",
+    }
+
+    PROMPT_TEMPLATE = (
+        "You are annotating a social meme sample. "
+        "The text on the picture says: {text}. "
+        "It expresses {sentiment_category} emotion with a {sentiment_degree} degree, "
+        "based on existing dataset annotations.\n\n"
+        "Task: decide the metaphor understanding path as one of: direct, sequential, parallel.\n"
+        "Use these practical criteria:\n"
+        "- direct: the metaphor is recognized immediately at first glance from the image-text pair.\n"
+        "- sequential: an obvious high-salience meaning appears first, but deeper thinking shows that first meaning is wrong and then the correct metaphorical meaning is reached.\n"
+        "- parallel: at first glance there are multiple plausible interpretation directions, and it is not immediately clear which meaning is correct.\n\n"
+        "Output JSON only in this format: {{\"metaphor_path\": \"direct\"}}"
+    )
+
+    def extract_fields(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        text = str(record.get("text", "")).strip()
+        sentiment_raw = str(record.get("sentiment category", "")).strip()
+        sentiment_degree = str(record.get("sentiment degree", "")).strip()
+        metaphor_occurrence = str(record.get("metaphor occurrence", "")).strip().lower()
+        image_path = str(record.get("image_path", "")).strip()
+
+        if image_path and self.image_root and not Path(image_path).is_absolute():
+            image_path = str(self.image_root / image_path)
+
+        if "(" in sentiment_raw and ")" in sentiment_raw:
+            emotion_type = sentiment_raw.split("(", 1)[1].split(")", 1)[0].strip().lower()
+        elif sentiment_raw in self.SENTIMENT_ID_TO_LABEL:
+            emotion_type = self.SENTIMENT_ID_TO_LABEL[sentiment_raw]
+        else:
+            emotion_type = sentiment_raw.lower()
+
+        is_metaphor: Optional[bool] = None
+        if metaphor_occurrence in {"1", "true", "yes"}:
+            is_metaphor = True
+        elif metaphor_occurrence in {"0", "false", "no"}:
+            is_metaphor = False
+
+        return {
+            "image_path": image_path,
+            "text": text,
             "emotion_type": emotion_type,
-            "problem": self.PROBLEM,
-            "options": list(self.EMOTION_OPTIONS),
-            "answer": emotion_type,
+            "sentiment_degree": sentiment_degree,
+            "is_metaphor": is_metaphor,
         }
-        return base
 
-    def build_output_record(self, record: Dict[str, Any], annotation: Dict[str, Any]) -> Dict[str, Any]:
-        output = self.build_base_record(record)
-        output["image_description"] = annotation.get("image_description", "")
-        output["metaphor_path"] = annotation.get("metaphor_path", "")
-        output["think"] = ""
-        return output
+    def build_prompt(self, fields: Dict[str, Any]) -> str:
+        return self.PROMPT_TEMPLATE.format(
+            text=fields["text"],
+            sentiment_category=fields["emotion_type"],
+            sentiment_degree=fields["sentiment_degree"],
+        ).strip()
+
+    def build_output_record(self, fields: Dict[str, Any], annotation: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "image_path": fields["image_path"],
+            "text": fields["text"],
+            "is_metaphor": fields["is_metaphor"],
+            "metaphor_path": str(annotation.get("metaphor_path", "")),
+            "emotion_type": fields["emotion_type"],
+            "caption": "",
+            "think": "",
+        }
+
+
+class CLI:
+    def run(
+        self,
+        input: str,
+        output: str,
+        model: str,
+        image_root: Optional[str] = None,
+        api_keys: Optional[str] = None,
+        max_concurrent: int = 50,
+        max_retries: int = 5,
+        limit: int = 0,
+    ) -> None:
+        config = AnnotatorConfig(
+            input_path=Path(input),
+            output_path=Path(output),
+            model_name=model,
+            api_keys=parse_api_keys(api_keys),
+            max_concurrent_per_key=max_concurrent,
+            max_retries=max_retries,
+            limit=limit,
+        )
+        annotator = MetMemeAnnotator(config, image_root=Path(image_root) if image_root else None)
+        annotator.run()
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Annotate MultiMeme (stage 1: description + metaphor path).")
-    parser.add_argument("--input", required=True, help="Input JSONL path")
-    parser.add_argument("--output", required=True, help="Output JSONL path")
-    parser.add_argument("--image-root", default=None, help="Optional image root to resolve relative paths")
-    parser.add_argument("--model", required=True, help="Model name")
-    parser.add_argument("--api-keys", default=None, help="Comma-separated API keys")
-    parser.add_argument("--max-concurrent", type=int, default=50, help="Max concurrent requests per key")
-    parser.add_argument("--max-retries", type=int, default=5, help="Max retries per request")
-
-    args = parser.parse_args()
-
-    config = AnnotatorConfig(
-        input_path=Path(args.input),
-        output_path=Path(args.output),
-        model_name=args.model,
-        api_keys=parse_api_keys(args.api_keys),
-        max_concurrent_per_key=args.max_concurrent,
-        max_retries=args.max_retries,
-    )
-
-    annotator = MultiMemeAnnotator(config, image_root=args.image_root)
-    annotator.run()
+    fire.Fire(CLI)
 
 
 if __name__ == "__main__":
