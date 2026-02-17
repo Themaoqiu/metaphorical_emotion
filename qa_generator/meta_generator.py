@@ -20,6 +20,7 @@ EXAMPLE_RECORD = {
     "metaphor_path": "sequential",
     "emotion_type": "love",
     "caption": "",
+    "extra_info": {},
     "think": "",
 }
 
@@ -73,6 +74,19 @@ class BaseAnnotator(ABC):
         raise NotImplementedError
 
     def load_records(self) -> List[Dict[str, Any]]:
+        if self.config.input_path.suffix.lower() == ".json":
+            with self.config.input_path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            if isinstance(data, list):
+                records = data
+            elif isinstance(data, dict):
+                records = [data]
+            else:
+                raise ValueError(f"Unsupported JSON format in {self.config.input_path}")
+            if self.config.limit > 0:
+                records = records[: self.config.limit]
+            return records
+
         records: List[Dict[str, Any]] = []
         with self.config.input_path.open("r", encoding="utf-8") as handle:
             for line in handle:
@@ -236,6 +250,63 @@ class MetMemeAnnotator(BaseAnnotator):
             "metaphor_path": str(annotation.get("metaphor_path", "")),
             "emotion_type": fields["emotion_type"],
             "caption": "",
+            "extra_info": {},
+            "think": "",
+        }
+
+
+class YesButAnnotator(BaseAnnotator):
+    EMOTION_PROMPT_TEMPLATE = (
+        "You are annotating a YesBut sample from a JSON record with fields like "
+        "description, caption, contradiction, and moral. "
+        "All samples are metaphorical comics and you only need to classify the primary emotion category.\n\n"
+        "The description of the image content is {caption}, and the implied metaphorical meaning is {moral}. "
+        "Choose one emotion from: happiness, love, anger, sorrow, fear, hate, surprise, neutral. "
+        "happiness means a sense of happiness, optimism, and relaxation, embracing feelings of tranquility and ecstasy. "
+        "love means a profound and positive emotional and psychological state, signifying deep and sincere affection towards individuals or entities. "
+        "This sentiment has the power to evoke warm attraction, intense passion, and selfless dedication. "
+        "Typically, love manifests in interpersonal relationships, such as those between family members, friends, or romantic partners. "
+        "anger means a potent emotion that surfaces when confronted with something bad or unjust. "
+        "It encompasses feelings of trouble and rage, including annoyance and intense displeasure. "
+        "sorrow is commonly employed to characterize the psychological state experienced when confronting negative emotions like loss and pain. "
+        "This emotional state typically manifests as a psychological condition marked by feelings of frustration, pensiveness, or grief. "
+        "fear conveys a negative sensation that arises in the face of danger or when confronted with something frightening. "
+        "It encompasses emotions such as worry, anxiety, and panic, encapsulating a range of feelings including apprehension, anxiety, and terror. "
+        "hate means a profound aversion towards someone or something deemed unacceptable, distasteful, or possessing unpleasant visual or olfactory qualities. "
+        "This emotional response can encompass disinterest, dislike, or even a sense of loathing. "
+        "surprise is the emotion elicited by unforeseen or sudden events, manifesting in a state of distraction and amazement. "
+        "neutral indicates that the picture evokes no specific emotional response.\n"
+        "Only output a JSON which only in this format: {{\"emotion_type\": \"happiness\"}}"
+    )
+
+    def extract_fields(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        caption = str(record.get("caption", "")).strip()
+        moral = str(record.get("moral", "")).strip()
+        image_path = str(record.get("image_file", "")).strip()
+
+        return {
+            "image_path": image_path,
+            "caption": caption,
+            "moral": moral,
+            "is_metaphor": True,
+            "metaphor_path": "sequential",
+        }
+
+    def build_prompt(self, fields: Dict[str, Any]) -> str:
+        return self.EMOTION_PROMPT_TEMPLATE.format(
+            caption=fields["caption"],
+            moral=fields["moral"],
+        ).strip()
+
+    def build_output_record(self, fields: Dict[str, Any], annotation: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "image_path": fields["image_path"],
+            "text": "",
+            "is_metaphor": True,
+            "metaphor_path": "sequential",
+            "emotion_type": str(annotation.get("emotion_type", "")).strip().lower(),
+            "caption": fields["caption"],
+            "extra_info": {"moral": fields["moral"]} if fields["moral"] else {},
             "think": "",
         }
 
@@ -246,6 +317,7 @@ class CLI:
         input: str,
         output: str,
         model: str,
+        dataset: str,
         image_root: Optional[str] = None,
         api_keys: Optional[str] = None,
         max_concurrent: int = 50,
@@ -261,7 +333,13 @@ class CLI:
             max_retries=max_retries,
             limit=limit,
         )
-        annotator = MetMemeAnnotator(config, image_root=Path(image_root) if image_root else None)
+        dataset_name = dataset.strip().lower()
+        if dataset_name == "metmeme":
+            annotator = MetMemeAnnotator(config, image_root=Path(image_root) if image_root else None)
+        elif dataset_name == "yesbut":
+            annotator = YesButAnnotator(config, image_root=Path(image_root) if image_root else None)
+        else:
+            raise ValueError(f"Unsupported dataset: {dataset}. Use metmeme or yesbut.")
         annotator.run()
 
 
