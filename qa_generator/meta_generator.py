@@ -194,12 +194,11 @@ class MetMemeAnnotator(BaseAnnotator):
     PROMPT_TEMPLATE = (
         "You are annotating a social meme sample. "
         "The text on the picture says: {text}. "
-        "It expresses {sentiment_category} emotion with a {sentiment_degree} degree, "
+        "The source domain is {source_domain}, and the target domain is {target_domain}. "
         "based on existing dataset annotations.\n\n"
-        "Task: decide the metaphor understanding path as one of: direct, sequential, parallel.\n"
-        "Use these practical criteria:\n"
-        "- direct: the metaphor is recognized immediately at first glance from the image-text pair.\n"
-        "- sequential: an obvious high-salience meaning appears first, but deeper thinking shows that first meaning is wrong and then the correct metaphorical meaning is reached.\n"
+        "Task: Based on the image text provided, as well as the source domain and target domain of the metaphor, reflect on and present the metaphor comprehension pathway required to understand the image's meaning. The metaphor comprehension pathway is defined as follows:\n"
+        "- direct: The content of the image uses common idioms or fixed expressions, its metaphorical meaning can be immediately grasped at first glance without additional interpretation.\n"
+        "- sequential: When reading the text sequentially and viewing the image, one first perceives the literal meaning of the picture. However, upon integrating the context and the content of the image, this literal meaning is revealed to be incorrect, and a cognitive shift is required to truly grasp the metaphorical meaning it conveys.\n"
         "- parallel: at first glance there are multiple plausible interpretation directions, and it is not immediately clear which meaning is correct.\n\n"
         "Output JSON only in this format: {{\"metaphor_path\": \"direct\"}}"
     )
@@ -208,11 +207,10 @@ class MetMemeAnnotator(BaseAnnotator):
         text = str(record.get("text", "")).strip()
         sentiment_raw = str(record.get("sentiment category", "")).strip()
         sentiment_degree = str(record.get("sentiment degree", "")).strip()
+        source_domain = str(record.get("source domain", "")).strip()
+        target_domain = str(record.get("target domain", "")).strip()
         metaphor_occurrence = str(record.get("metaphor occurrence", "")).strip().lower()
         image_path = str(record.get("image_path", "")).strip()
-
-        if image_path and self.image_root and not Path(image_path).is_absolute():
-            image_path = str(self.image_root / image_path)
 
         if "(" in sentiment_raw and ")" in sentiment_raw:
             emotion_type = sentiment_raw.split("(", 1)[1].split(")", 1)[0].strip().lower()
@@ -232,12 +230,16 @@ class MetMemeAnnotator(BaseAnnotator):
             "text": text,
             "emotion_type": emotion_type,
             "sentiment_degree": sentiment_degree,
+            "source_domain": source_domain,
+            "target_domain": target_domain,
             "is_metaphor": is_metaphor,
         }
 
     def build_prompt(self, fields: Dict[str, Any]) -> str:
         return self.PROMPT_TEMPLATE.format(
             text=fields["text"],
+            source_domain=fields["source_domain"],
+            target_domain=fields["target_domain"],
             sentiment_category=fields["emotion_type"],
             sentiment_degree=fields["sentiment_degree"],
         ).strip()
