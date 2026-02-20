@@ -4,6 +4,9 @@ import logging
 import asyncio
 import os
 import json
+import base64
+import mimetypes
+from pathlib import Path
 from .vision_utils import build_multimodal_message
 
 logger = logging.getLogger(__name__)
@@ -12,7 +15,7 @@ logger = logging.getLogger(__name__)
 class QAWrapper:
     """Asynchronous wrapper for LLM API client."""
 
-    SUPPORTED_REASONING_MODELS = ["DeepSeek-R1", "gemini-3-flash"]
+    SUPPORTED_REASONING_MODELS = ["DeepSeek-R1", "gemini-3-flash-preview", "qwen3-vl-flash"]
 
     def __init__(self, model_name: str, api_key: str, max_retries: int = 5):
         """
@@ -82,6 +85,13 @@ class QAWrapper:
                         return await self._qa_standard(system_prompt, user_prompt)
 
             except Exception as e:
+                error_text = str(e).lower()
+                if "data_inspection_failed" in error_text or "datainspectionfailed" in error_text:
+                    logger.error("Content inspection failed; skip this sample without retry")
+                    return {
+                        "answer": "__ERROR__:data_inspection_failed",
+                        "rational": ""
+                    }
                 self.stats["errors"] += 1
                 self.stats["retries"] += 1
 
@@ -190,11 +200,31 @@ class QAWrapper:
                     )
                     if image_value is None:
                         raise ValueError("Image item must include 'image' or 'image_path'")
+                    image_str = str(image_value)
+                    if image_str.startswith(("http://", "https://", "data:")):
+                        image_url = image_str
+                    else:
+                        image_path = Path(image_str)
+                        if not image_path.exists():
+                            raise FileNotFoundError(f"Image file not found: {image_path}")
+                        mime_type, _ = mimetypes.guess_type(str(image_path))
+                        if not mime_type:
+                            mime_type = "image/jpeg"
+                        encoded = base64.b64encode(image_path.read_bytes()).decode("utf-8")
+                        image_url = f"data:{mime_type};base64,{encoded}"
+
                     image_obj = {
-                        "type": "image",
-                        "image": image_value  # Local path or URL
+                        "type": "image_url",
+                        "image_url": {"url": image_url},
                     }
                     logger.debug(f"  Image content: {image_obj}")
+                    content.append(image_obj)
+                
+                elif item.get('type') == 'image_url':
+                    image_obj = {
+                        "type": "image_url",
+                        "image_url": item.get("image_url"),
+                    }
                     content.append(image_obj)
             
             logger.info(f"Making API request:")

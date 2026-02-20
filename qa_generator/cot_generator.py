@@ -130,17 +130,63 @@ def _first_value(record: Dict[str, Any], keys: Sequence[str]) -> Optional[Any]:
     return None
 
 
-class MultiMemeAnnotator(BaseAnnotator):
-    DATASET_NAME = "multimeme"
-    SYSTEM_PROMPT = "你是一个严谨的多模态标注助手，输出必须是JSON。"
-    PROMPT_TEMPLATE = (
-        "基于已有标注信息，补充思维链。\n"
-        "文本: {text}\n"
-        "情感类型: {emotion_type}\n"
-        "图片描述: {image_description}\n"
-        "隐喻理解路径: {metaphor_path}\n"
-        "请给出简洁的思维链，说明如何由图像与文本得到情感判断。\n"
-        "仅输出JSON，格式如下: {\"think\": \"...\"}"
+class MetMemeAnnotator(BaseAnnotator):
+    EMOTION_OPTIONS = [
+        "happiness",
+        "love",
+        "anger",
+        "sorrow",
+        "fear",
+        "hate",
+        "surprise",
+        "neutral",
+    ]
+    DEFAULT_PROBLEM = "What metaphor is shown in this image, and which emotion category best matches its implied meaning?"
+
+    SYSTEM_PROMPT = (
+        "You are an expert metaphorical image emotion analysis assistant specialized in creating natural, "
+        "flowing Chain of Thought reasoning.\n\n"
+        "You will be given:\n"
+        "- A question about the metaphor and emotion in one image\n"
+        "- Answer options with emotion categories\n"
+        "- The correct answer\n"
+        "- Key fields: is_metaphor, text, emotion_type, caption\n\n"
+        "Your task:\n"
+        "- Analyze the image using provided key fields.\n"
+        "- Use this exact tag order in your reasoning output:\n"
+        "  1) <caption></caption>: initial visual perception only, no metaphor or emotion analysis.\n"
+        "  2) <metaphor></metaphor>: check whether metaphor exists based on the provided information; if yes, explain your understanding path "
+        "(direct, sequential, or parallel).\n"
+        "  3) <think></think>: deeper reasoning that combines visual clues and metaphor judgment.\n"
+        "  4) <answer></answer>: final answer as one emotion label from options.\n"
+        "- Keep the reasoning natural and conversational, but concise and evidence-based.\n"
+        "- Use English only.\n\n"
+        "Example Output Style:\n"
+        "<caption>A cartoon character stands under dark clouds while holding a tiny umbrella. The text says, "
+        "\"My week in one picture.\"</caption>\n"
+        "<metaphor>There is a metaphor. The dark cloud is not literal weather only; it maps to ongoing pressure "
+        "and emotional burden. This fits a direct path because the visual convention is immediately recognizable."
+        "</metaphor>\n"
+        "<think>Let me connect the clues. The facial expression looks tired, the cloud follows the character, "
+        "and the text generalizes the state to a whole week. Together they imply persistent stress rather than "
+        "a single bad moment, so the dominant emotion is closer to sorrow than surprise or anger.</think>\n"
+        "<answer>sorrow</answer>\n\n"
+        "Output JSON only in this format:\n"
+        "{\"analysis\": \"<caption>...</caption>\\n<metaphor>...</metaphor>\\n<think>...</think>\\n<answer>...</answer>\"}"
+    )
+
+    USER_PROMPT_TEMPLATE = (
+        "Question: {problem}\n\n"
+        "Answer Options:\n"
+        "{options_text}\n\n"
+        "Correct Answer: {correct_answer}\n\n"
+        "Known Fields:\n"
+        "- is_metaphor: {is_metaphor}\n"
+        "- text: {text}\n"
+        "- emotion_type: {emotion_type}\n"
+        "- caption: {caption}\n\n"
+        "Task: Generate a natural, conversational reasoning process for metaphorical emotion analysis. "
+        "Use exactly these tags in order: <caption>, <metaphor>, <think>, <answer>."
     )
 
     def __init__(self, *args, image_root: Optional[Path] = None, **kwargs) -> None:
@@ -167,17 +213,34 @@ class MultiMemeAnnotator(BaseAnnotator):
         value = _first_value(record, ["text", "Text"])
         return str(value) if value is not None else ""
 
+    def _format_options_text(self, options: Any) -> str:
+        if isinstance(options, dict):
+            items = [(str(k), str(v)) for k, v in options.items()]
+        elif isinstance(options, list):
+            labels = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+            items = [(labels[idx], str(v)) for idx, v in enumerate(options) if idx < len(labels)]
+        else:
+            items = [(label, emotion) for label, emotion in zip("ABCDEFGH", self.EMOTION_OPTIONS)]
+        if not items:
+            items = [(label, emotion) for label, emotion in zip("ABCDEFGH", self.EMOTION_OPTIONS)]
+        return "\n".join(f"{label}. {value}" for label, value in items)
+
     def build_prompt_text(self, record: Dict[str, Any]) -> str:
         text = self.extract_text(record)
         emotion_type = record.get("emotion_type") or ""
-        image_description = record.get("image_description", "")
-        metaphor_path = record.get("metaphor_path", "")
+        is_metaphor = record.get("is_metaphor", "")
+        caption = record.get("caption", "")
+        problem = str(record.get("problem", "")).strip() or self.DEFAULT_PROBLEM
+        options_text = self._format_options_text(record.get("options"))
 
-        return self.PROMPT_TEMPLATE.format(
+        return self.USER_PROMPT_TEMPLATE.format(
+            problem=problem,
+            options_text=options_text,
+            correct_answer=emotion_type,
+            is_metaphor=is_metaphor,
             text=text,
             emotion_type=emotion_type,
-            image_description=image_description,
-            metaphor_path=metaphor_path,
+            caption=caption,
         ).strip()
 
     def build_prompt(self, record: Dict[str, Any]) -> Union[str, List[Dict[str, Any]]]:
@@ -192,7 +255,7 @@ class MultiMemeAnnotator(BaseAnnotator):
 
     def build_output_record(self, record: Dict[str, Any], annotation: Dict[str, Any]) -> Dict[str, Any]:
         output = dict(record)
-        output["think"] = annotation.get("think", "")
+        output["think"] = annotation.get("analysis", "")
         return output
 
     def handle_error_record(self, record: Dict[str, Any], response: str) -> Dict[str, Any]:
@@ -223,7 +286,7 @@ def main() -> None:
         max_retries=args.max_retries,
     )
 
-    annotator = MultiMemeAnnotator(config, image_root=args.image_root)
+    annotator = MetMemeAnnotator(config, image_root=args.image_root)
     annotator.run()
 
 
