@@ -4,12 +4,13 @@ import argparse
 import asyncio
 import json
 import os
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Union
 
-from api_sync import StreamGenerator
+from api_sync.api import StreamGenerator
 from api_sync.utils.parser import JSONParser
 
 
@@ -22,9 +23,16 @@ class AnnotatorConfig:
     max_concurrent_per_key: int = 50
     max_retries: int = 5
     rational: bool = False
+    start_index: int = 1
+    end_index: Optional[int] = None
 
 
 class BaseAnnotator(ABC):
+    ANALYSIS_TAG_PATTERN = re.compile(
+        r"^\s*<caption>.*?</caption>\s*<metaphor>.*?</metaphor>\s*<think>.*?</think>\s*<answer>.*?</answer>\s*$",
+        re.DOTALL,
+    )
+
     def __init__(self, config: AnnotatorConfig) -> None:
         self.config = config
         self.stream = StreamGenerator(
@@ -80,34 +88,65 @@ class BaseAnnotator(ABC):
         return JSONParser.parse(response)
 
     async def _run_async(self, records: Sequence[Dict[str, Any]]) -> None:
-        prompts = self._build_prompts(records)
         self.config.output_path.parent.mkdir(parents=True, exist_ok=True)
+        annotations_by_idx: Dict[int, Dict[str, Any]] = {}
+        pending_indices = list(range(len(records)))
+        round_id = 0
 
-        with self.config.output_path.open("w", encoding="utf-8") as handle:
+        while pending_indices:
+            round_id += 1
+            prompts = [
+                {"id": str(idx), "prompt": self.build_prompt(records[idx])}
+                for idx in pending_indices
+            ]
+            next_pending: List[int] = []
+            seen_indices = set()
+
             async for result in self.stream.generate_stream(
                 prompts=prompts,
                 system_prompt=self.system_prompt,
                 validate_func=self._validate_response,
             ):
                 record_index = int(result["id"])
-                record = records[record_index]
+                seen_indices.add(record_index)
                 response = result["result"]
+                annotation = response if isinstance(response, dict) else self._validate_response(response)
 
-                if isinstance(response, dict):
-                    annotation = response
-                else:
-                    annotation = self._validate_response(response)
+                if annotation is None or not self._validate_annotation_format(annotation):
+                    next_pending.append(record_index)
+                    continue
+                annotations_by_idx[record_index] = annotation
 
-                if annotation is None:
-                    output_record = self.handle_error_record(record, str(response))
-                else:
-                    output_record = self.build_output_record(record, annotation)
+            for idx in pending_indices:
+                if idx not in seen_indices and idx not in next_pending:
+                    next_pending.append(idx)
 
+            pending_indices = next_pending
+            print(f"[cot_generator] format-check round={round_id}, remaining={len(pending_indices)}")
+
+        with self.config.output_path.open("w", encoding="utf-8") as handle:
+            for idx, record in enumerate(records):
+                output_record = self.build_output_record(record, annotations_by_idx[idx])
                 handle.write(json.dumps(output_record, ensure_ascii=False) + "\n")
+
+    def _validate_annotation_format(self, annotation: Dict[str, Any]) -> bool:
+        analysis = annotation.get("analysis")
+        if not isinstance(analysis, str):
+            return False
+        return self.ANALYSIS_TAG_PATTERN.match(analysis) is not None
 
     def run(self) -> None:
         records = self.load_records()
-        asyncio.run(self._run_async(records))
+        start = self.config.start_index
+        end = self.config.end_index if self.config.end_index is not None else len(records)
+
+        if start < 1:
+            raise ValueError(f"--start must be >= 1, got {start}")
+        if end < start:
+            raise ValueError(f"--end must be >= --start, got start={start}, end={end}")
+
+        selected_records = records[start - 1:end]
+        asyncio.run(self._run_async(selected_records))
 
 
 def parse_api_keys(value: Optional[str]) -> List[str]:
@@ -150,28 +189,29 @@ class MetMemeAnnotator(BaseAnnotator):
         "- A question about the metaphor and emotion in one image\n"
         "- Answer options with emotion categories\n"
         "- The correct answer\n"
-        "- Key fields: is_metaphor, text, emotion_type, caption\n\n"
+        "- Key fields: is_metaphor, metaphor_path, text, emotion_type, caption\n\n"
         "Your task:\n"
         "- Analyze the image using provided key fields.\n"
         "- Use this exact tag order in your reasoning output:\n"
         "  1) <caption></caption>: initial visual perception only, no metaphor or emotion analysis.\n"
-        "  2) <metaphor></metaphor>: check whether metaphor exists based on the provided information; if yes, explain your understanding path "
-        "(direct, sequential, or parallel).\n"
+        "  2) <metaphor></metaphor>: check whether metaphor exists based on the provided information; if yes, explain the understanding path using the pathway definitions above and keep it consistent with the given metaphor_path when provided.\n"
+        "Metaphor comprehension pathways:\n"
+        "- direct: The image employs common idioms or fixed expressions, or its metaphor can be recognized at a glance without additional interpretation.\n"
+        "- sequential: When reading the text sequentially and viewing the image, one first perceives the literal meaning of the picture. However, upon integrating the context and the content of the image, this literal meaning is revealed to be incorrect, and a cognitive shift is required to truly grasp the metaphorical meaning it conveys.\n"
+        "- parallel: After examining the entire image, both its metaphorical and literal meanings are quite common, with roughly equal weight in comprehension. Unlike direct expressions, which only evoke one meaning (for instance, one does not think of the literal meaning when using an idiom).\n\n"
         "  3) <think></think>: deeper reasoning that combines visual clues and metaphor judgment.\n"
         "  4) <answer></answer>: final answer as one emotion label from options.\n"
         "- Keep the reasoning natural and conversational, but concise and evidence-based.\n"
         "- Use English only.\n\n"
         "Example Output Style:\n"
-        "<caption>A cartoon character stands under dark clouds while holding a tiny umbrella. The text says, "
-        "\"My week in one picture.\"</caption>\n"
-        "<metaphor>There is a metaphor. The dark cloud is not literal weather only; it maps to ongoing pressure "
-        "and emotional burden. This fits a direct path because the visual convention is immediately recognizable."
-        "</metaphor>\n"
-        "<think>Let me connect the clues. The facial expression looks tired, the cloud follows the character, "
-        "and the text generalizes the state to a whole week. Together they imply persistent stress rather than "
-        "a single bad moment, so the dominant emotion is closer to sorrow than surprise or anger.</think>\n"
-        "<answer>sorrow</answer>\n\n"
-        "Output JSON only in this format:\n"
+        "<caption>In the top panel, a monkey is thoughtfully selecting one of several ropes to climb on in a forest. In the bottom panel, a human is in a subway station, pointing at a subway map as if choosing a route or getting information.</caption>\n"
+        "<metaphor>There is a metaphor, and the path is parallel. Both scenes show route selection in different "
+        "worlds, linking animal movement and urban navigation. Literal and metaphorical readings are both common "
+        "and equally salient.</metaphor>\n"
+        "<think>The focus is comparison, not emotional drama. Both figures look focused and calm, with no strong "
+        "signals of joy, fear, anger, or sadness. So neutral fits best.</think>\n"
+        "<answer>neutral</answer>\n\n"
+        "Output JSON only in this format, and donot output any other tags:\n"
         "{\"analysis\": \"<caption>...</caption>\\n<metaphor>...</metaphor>\\n<think>...</think>\\n<answer>...</answer>\"}"
     )
 
@@ -182,6 +222,7 @@ class MetMemeAnnotator(BaseAnnotator):
         "Correct Answer: {correct_answer}\n\n"
         "Known Fields:\n"
         "- is_metaphor: {is_metaphor}\n"
+        "- metaphor_path: {metaphor_path}\n"
         "- text: {text}\n"
         "- emotion_type: {emotion_type}\n"
         "- caption: {caption}\n\n"
@@ -229,6 +270,7 @@ class MetMemeAnnotator(BaseAnnotator):
         text = self.extract_text(record)
         emotion_type = record.get("emotion_type") or ""
         is_metaphor = record.get("is_metaphor", "")
+        metaphor_path = record.get("metaphor_path", "")
         caption = record.get("caption", "")
         problem = str(record.get("problem", "")).strip() or self.DEFAULT_PROBLEM
         options_text = self._format_options_text(record.get("options"))
@@ -238,6 +280,7 @@ class MetMemeAnnotator(BaseAnnotator):
             options_text=options_text,
             correct_answer=emotion_type,
             is_metaphor=is_metaphor,
+            metaphor_path=metaphor_path,
             text=text,
             emotion_type=emotion_type,
             caption=caption,
@@ -245,12 +288,6 @@ class MetMemeAnnotator(BaseAnnotator):
 
     def build_prompt(self, record: Dict[str, Any]) -> Union[str, List[Dict[str, Any]]]:
         prompt_text = self.build_prompt_text(record)
-        image_path = self.resolve_image_path(record)
-        if image_path:
-            return [
-                {"type": "image", "image": str(image_path)},
-                {"type": "text", "text": prompt_text},
-            ]
         return prompt_text
 
     def build_output_record(self, record: Dict[str, Any], annotation: Dict[str, Any]) -> Dict[str, Any]:
@@ -269,11 +306,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Annotate MultiMeme (stage 2: chain-of-thought).")
     parser.add_argument("--input", required=True, help="Input JSONL path (stage1 output)")
     parser.add_argument("--output", required=True, help="Output JSONL path")
-    parser.add_argument("--image-root", default=None, help="Optional image root to resolve relative paths")
+    parser.add_argument("--image-root", default=None, help="Deprecated. COT generation now uses text-only prompts.")
     parser.add_argument("--model", required=True, help="Model name")
     parser.add_argument("--api-keys", default=None, help="Comma-separated API keys")
     parser.add_argument("--max-concurrent", type=int, default=50, help="Max concurrent requests per key")
     parser.add_argument("--max-retries", type=int, default=5, help="Max retries per request")
+    parser.add_argument("--start", type=int, default=1, help="Start record index (1-based, inclusive)")
+    parser.add_argument("--end", type=int, default=None, help="End record index (1-based, inclusive)")
 
     args = parser.parse_args()
 
@@ -284,6 +323,8 @@ def main() -> None:
         api_keys=parse_api_keys(args.api_keys),
         max_concurrent_per_key=args.max_concurrent,
         max_retries=args.max_retries,
+        start_index=args.start,
+        end_index=args.end,
     )
 
     annotator = MetMemeAnnotator(config, image_root=args.image_root)
