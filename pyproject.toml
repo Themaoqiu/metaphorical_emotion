@@ -10,6 +10,10 @@ dependencies = [
     "kagglehub>=0.4.2",
     "numpy>=2.4.2",
     "openai>=2.21.0",
+    "pandas>=2.3.3",
     "pillow>=12.1.1",
     "qwen-vl-utils>=0.0.14",
+    "scikit-learn>=1.7.2",
+    "transformers>=4.57.1",
+    "vllm>=0.11.0",
 ]

@@ -9,4 +9,15 @@ wheels/
 
 # Virtual environments
 .venv
+.env.*
 
+# Training and evaluation artifacts
+*.log
+eval/results/
+trainer/logs/
+trainer/generated/
+
+# Common ML outputs
+checkpoints/
+saves/
+results/
