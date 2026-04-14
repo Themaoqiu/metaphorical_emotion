@@ -32,6 +32,7 @@ export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 
 if [ ! -d "$LLAMA_FACTORY_DIR" ]; then
     echo "[FATAL] LLAMA_FACTORY_DIR does not exist: $LLAMA_FACTORY_DIR"
+    echo "[FATAL] run.sh depends on a local LLaMA-Factory checkout."
     exit 1
 fi
 
@@ -42,6 +43,7 @@ fi
 
 if [ ! -x "$VENV_PYTHON" ] || [ ! -x "$VENV_CLI" ]; then
     echo "[FATAL] Missing virtualenv runtime: $VENV_DIR"
+    echo "[FATAL] run.sh must be executed with the LLaMA-Factory virtualenv available."
     exit 1
 fi
 
