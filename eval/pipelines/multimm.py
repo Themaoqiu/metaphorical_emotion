@@ -67,6 +67,7 @@ class MultiMMPipeline(BasePipeline):
 
         datasets: List[Dict[str, Any]] = []
         missing_images = 0
+        invalid_images = 0
         for language in ("CN", "EN"):
             rows = read_multimm_csv(csv_paths[language])
             columns = resolve_multimm_columns(rows)
@@ -76,6 +77,9 @@ class MultiMMPipeline(BasePipeline):
                 image_path = image_dir / Path(image_name).name
                 if not image_path.exists():
                     missing_images += 1
+                    continue
+                if not self.is_valid_image(image_path):
+                    invalid_images += 1
                     continue
 
                 datasets.append(
@@ -95,6 +99,8 @@ class MultiMMPipeline(BasePipeline):
         logger.info("Loaded %s MultiMM samples from %s", len(datasets), data_root)
         if missing_images:
             logger.warning("Skipped %s MultiMM rows because images were missing", missing_images)
+        if invalid_images:
+            logger.warning("Skipped %s MultiMM rows because images were invalid", invalid_images)
         return datasets
 
     def run_evaluation(self):

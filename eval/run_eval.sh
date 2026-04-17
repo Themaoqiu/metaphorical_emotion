@@ -5,8 +5,8 @@ set -Eeuo pipefail
 export CUDA_VISIBLE_DEVICES=0
 
 python main.py run \
-    --model_name qwen2.5VL \
-    --model_path /home/wangxingjian/shared/models/Qwen/Qwen2.5-VL-7B-Instruct \
+    --model_name qwen3.5 \
+    --model_path /home/wangxingjian/model/qwen3.5-9b \
     --data_name multimm \
     --annotation_path /home/wangxingjian/data/metaphor/MultiMM/data \
     --image_dir /home/wangxingjian/data/metaphor/MultiMM/data \

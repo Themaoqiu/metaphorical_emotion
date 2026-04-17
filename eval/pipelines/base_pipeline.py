@@ -28,6 +28,7 @@ class BasePipeline(ABC):
         self.output_dir = Path(output_dir)
         self.batch_size = batch_size
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self._image_validation_capability_logged = False
 
     @abstractmethod
     def load_data(self) -> List[Dict[str, Any]]:
@@ -86,3 +87,20 @@ class BasePipeline(ABC):
 
         logger.info("Detailed results saved to %s", results_file)
         logger.info("Summary saved to %s", summary_file)
+
+    def is_valid_image(self, image_path: Path) -> bool:
+        try:
+            from PIL import Image, ImageFile
+        except ImportError:
+            if not self._image_validation_capability_logged:
+                logger.warning("PIL is unavailable; skipping image integrity validation")
+                self._image_validation_capability_logged = True
+            return True
+
+        ImageFile.LOAD_TRUNCATED_IMAGES = False
+        try:
+            with Image.open(image_path) as image:
+                image.load()
+            return True
+        except OSError:
+            return False
