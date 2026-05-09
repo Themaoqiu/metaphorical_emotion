@@ -16,6 +16,8 @@ wheels/
 eval/results/
 trainer/logs/
 trainer/generated/
+output/
+tests/
 
 # Common ML outputs
 checkpoints/

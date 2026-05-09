@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import asyncio
 import json
 import os
@@ -9,6 +8,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Union
+
+import fire
 
 from api_sync.api import StreamGenerator
 from api_sync.utils.parser import JSONParser
@@ -25,12 +26,116 @@ class AnnotatorConfig:
     rational: bool = False
     start_index: int = 1
     end_index: Optional[int] = None
+    limit: int = 0
+
+
+def parse_api_keys(value: Optional[str]) -> List[str]:
+    if value:
+        return [item.strip() for item in value.split(",") if item.strip()]
+    env_value = (
+        os.getenv("MM_API_KEYS")
+        or os.getenv("API_KEYS")
+        or os.getenv("OPENAI_API_KEY")
+    )
+    if not env_value:
+        raise ValueError("API keys not provided. Use --api_keys or set MM_API_KEYS/API_KEYS.")
+    return [item.strip() for item in env_value.split(",") if item.strip()]
+
+
+def _first_value(record: Dict[str, Any], keys: Sequence[str]) -> Optional[Any]:
+    for key in keys:
+        if key in record and record[key] not in (None, ""):
+            return record[key]
+    return None
+
+
+def _format_field(label: str, value: Any) -> str:
+    if value is None:
+        value = ""
+    if isinstance(value, (list, dict)):
+        value = json.dumps(value, ensure_ascii=False)
+    return f"- {label}: {value}"
+
+
+def _stringify_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (list, dict)):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
+
+
+def _common_metaphor_fields(record: Dict[str, Any]) -> List[str]:
+    return [
+        _format_field("is_metaphor", record.get("is_metaphor", "")),
+        _format_field("metaphor_path", record.get("metaphor_path", "")),
+        _format_field("emotion_type", record.get("emotion_type", "")),
+        _format_field("caption", record.get("caption", "")),
+    ]
+
 
 
 class BaseAnnotator(ABC):
     ANALYSIS_TAG_PATTERN = re.compile(
         r"^\s*<caption>.*?</caption>\s*<metaphor>.*?</metaphor>\s*<think>.*?</think>\s*<answer>.*?</answer>\s*$",
         re.DOTALL,
+    )
+
+    EMOTION_OPTIONS = [
+        "happiness",
+        "love",
+        "anger",
+        "sorrow",
+        "fear",
+        "hate",
+        "surprise",
+        "neutral",
+    ]
+    DEFAULT_PROBLEM = (
+        "What metaphor is shown in this image, and which emotion category best matches its implied meaning?"
+    )
+
+    SYSTEM_PROMPT = (
+        "You are an expert metaphorical image emotion analysis assistant specialized in creating natural, flowing Chain of Thought reasoning process.\n\n"
+        "You will seen:\n"
+        "- A question about the metaphor and emotion in one image\n"
+        "- Answer options with emotion categories\n"
+        "- The correct answer\n"
+        "- Key information describing the image and its metaphorical content\n\n"
+        "Your task:\n"
+        "- Analyze the image using provided key fields.\n"
+        "- Use this exact tag order in your reasoning output:\n"
+        "  1) <caption></caption>: initial visual perception only, no metaphor or emotion analysis. Consistent basically with the visual content description of the image provided to you.\n"
+        "  2) <metaphor></metaphor>: check whether metaphor exists based on the provided information; if yes, explain the understanding path using the pathway definitions above and keep it consistent with the given metaphor_path when provided; if not, output 'There is no metaphor', then also give a simple explanation in 1 sentence.\n"
+        "Metaphor comprehension pathways:\n"
+        "- direct: The image employs common idioms or fixed expressions, or its metaphor can be recognized at a glance without additional interpretation.\n"
+        "- sequential: When reading the text sequentially and viewing the image, one first perceives the literal meaning of the picture. However, upon integrating the context and the content of the image, this literal meaning is revealed to be incorrect, and a cognitive shift is required to truly grasp the metaphorical meaning it conveys.\n"
+        "- parallel: After examining the entire image, both its metaphorical and literal meanings are quite common, with roughly equal weight in comprehension. Unlike direct expressions, which only evoke one meaning (for instance, one does not think of the literal meaning when using an idiom).\n\n"
+        "  3) <think></think>: deeper reasoning that combines visual clues and metaphor judgment for image's emotion analyse.\n"
+        "  4) <answer></answer>: final answer as one emotion label from options.\n"
+        "- Keep the reasoning natural, but concise and evidence-based.\n"
+        "- Use English only.\n\n"
+        "Example Output Style:\n"
+        "<caption>In the top panel, a monkey is thoughtfully selecting one of several ropes to climb on in a forest. In the bottom panel, a human is in a subway station, pointing at a subway map as if choosing a route or getting information.</caption>\n"
+        "<metaphor>There is a metaphor, and the path is parallel. Both scenes show route selection in different "
+        "worlds, linking animal movement and urban navigation. Literal and metaphorical readings are both common "
+        "and equally salient.</metaphor>\n"
+        "<think>The focus is comparison, not emotional drama. Both figures look focused and calm, with no strong "
+        "signals of joy, fear, anger, or sadness. So neutral fits best.</think>\n"
+        "<answer>neutral</answer>\n\n"
+        "Output JSON only in this format, and donot output any other tags:\n"
+        "{\"analysis\": \"<caption>...</caption>\\n<metaphor>...</metaphor>\\n<think>...</think>\\n<answer>...</answer>\"}"
+    )
+
+    USER_PROMPT_TEMPLATE = (
+        "A user may ask the following question about this image: {problem}\n\n"
+        "Answer Options:\n"
+        "{options_text}\n\n"
+        "Correct emotion category: {correct_answer}\n\n"
+        "Use the following information to understand the image and its metaphorical meaning:\n"
+        "{known_fields}\n\n"
+        "Task: Generate a natural, conversational chain of thought for metaphorical image's emotion analysis. "
+        "Use exactly these tags in order: <caption>, <metaphor>, <think>, <answer>."
     )
 
     def __init__(self, config: AnnotatorConfig) -> None:
@@ -45,20 +150,50 @@ class BaseAnnotator(ABC):
         )
 
     @property
-    @abstractmethod
     def system_prompt(self) -> str:
-        raise NotImplementedError
+        return self.SYSTEM_PROMPT
 
     @abstractmethod
+    def build_known_fields(self, record: Dict[str, Any]) -> str:
+        raise NotImplementedError
+
+    def emotion_options(self) -> Sequence[str]:
+        return self.EMOTION_OPTIONS
+
+    def _format_options_text(self, options: Any) -> str:
+        if isinstance(options, dict):
+            items = [(str(k), str(v)) for k, v in options.items()]
+        elif isinstance(options, list):
+            labels = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+            items = [(labels[idx], str(v)) for idx, v in enumerate(options) if idx < len(labels)]
+        else:
+            items = [(label, emotion) for label, emotion in zip("ABCDEFGH", self.emotion_options())]
+        if not items:
+            items = [(label, emotion) for label, emotion in zip("ABCDEFGH", self.emotion_options())]
+        return "\n".join(f"{label}. {value}" for label, value in items)
+
+    def build_prompt_text(self, record: Dict[str, Any]) -> str:
+        problem = str(record.get("problem", "")).strip() or self.DEFAULT_PROBLEM
+        options_text = self._format_options_text(record.get("options"))
+        correct_answer = record.get("emotion_type") or ""
+        known_fields = self.build_known_fields(record)
+        return self.USER_PROMPT_TEMPLATE.format(
+            problem=problem,
+            options_text=options_text,
+            correct_answer=correct_answer,
+            known_fields=known_fields,
+        ).strip()
+
     def build_prompt(self, record: Dict[str, Any]) -> Union[str, List[Dict[str, Any]]]:
-        raise NotImplementedError
+        return self.build_prompt_text(record)
 
-    @abstractmethod
     def build_output_record(self, record: Dict[str, Any], annotation: Dict[str, Any]) -> Dict[str, Any]:
-        raise NotImplementedError
+        output = dict(record)
+        output["think"] = annotation.get("analysis", "")
+        return output
 
     def handle_error_record(self, record: Dict[str, Any], response: str) -> Dict[str, Any]:
-        output = self.build_output_record(record, {})
+        output = dict(record)
         output["annotation_error"] = "parse_failed"
         output["raw_response"] = response
         return output
@@ -71,26 +206,63 @@ class BaseAnnotator(ABC):
                 if not line:
                     continue
                 records.append(json.loads(line))
+                if self.config.limit > 0 and len(records) >= self.config.limit:
+                    break
         return records
 
-    def _build_prompts(self, records: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        prompts: List[Dict[str, Any]] = []
-        for idx, record in enumerate(records):
-            prompts.append({
-                "id": str(idx),
-                "prompt": self.build_prompt(record),
-            })
-        return prompts
+    def get_resume_key(self, record: Dict[str, Any]) -> str:
+        return str(record.get("image_path", "")).strip()
+
+    def record_has_required_output(self, record: Dict[str, Any]) -> bool:
+        think = record.get("think")
+        if not isinstance(think, str) or not think.strip():
+            return False
+        return self.ANALYSIS_TAG_PATTERN.match(think) is not None
+
+    def _load_existing_output(self) -> Dict[str, Dict[str, Any]]:
+        if not self.config.output_path.exists() or self.config.output_path.stat().st_size == 0:
+            return {}
+
+        existing_by_key: Dict[str, Dict[str, Any]] = {}
+        with self.config.output_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                record = json.loads(line)
+                key = self.get_resume_key(record)
+                if key:
+                    existing_by_key[key] = record
+        return existing_by_key
 
     def _validate_response(self, response: str) -> Optional[Dict[str, Any]]:
         if isinstance(response, dict):
             return response
         return JSONParser.parse(response)
 
+    def _validate_annotation_format(self, annotation: Dict[str, Any]) -> bool:
+        analysis = annotation.get("analysis")
+        if not isinstance(analysis, str):
+            return False
+        return self.ANALYSIS_TAG_PATTERN.match(analysis) is not None
+
     async def _run_async(self, records: Sequence[Dict[str, Any]]) -> None:
         self.config.output_path.parent.mkdir(parents=True, exist_ok=True)
         annotations_by_idx: Dict[int, Dict[str, Any]] = {}
-        pending_indices = list(range(len(records)))
+        existing_output_by_key = self._load_existing_output()
+        resumed_output_by_idx: Dict[int, Dict[str, Any]] = {}
+        pending_indices: List[int] = []
+        for idx, record in enumerate(records):
+            existing_output = existing_output_by_key.get(self.get_resume_key(record))
+            if existing_output and self.record_has_required_output(existing_output):
+                resumed_output_by_idx[idx] = existing_output
+                continue
+            pending_indices.append(idx)
+
+        print(
+            f"[cot_generator] total={len(records)}, to_annotate={len(pending_indices)}, "
+            f"skipped={len(resumed_output_by_idx)}"
+        )
         round_id = 0
 
         while pending_indices:
@@ -124,16 +296,17 @@ class BaseAnnotator(ABC):
             pending_indices = next_pending
             print(f"[cot_generator] format-check round={round_id}, remaining={len(pending_indices)}")
 
-        with self.config.output_path.open("w", encoding="utf-8") as handle:
-            for idx, record in enumerate(records):
-                output_record = self.build_output_record(record, annotations_by_idx[idx])
-                handle.write(json.dumps(output_record, ensure_ascii=False) + "\n")
+        final_outputs: List[Dict[str, Any]] = []
+        for idx, record in enumerate(records):
+            if idx in resumed_output_by_idx:
+                final_outputs.append(resumed_output_by_idx[idx])
+                continue
+            output_record = self.build_output_record(record, annotations_by_idx[idx])
+            final_outputs.append(output_record)
 
-    def _validate_annotation_format(self, annotation: Dict[str, Any]) -> bool:
-        analysis = annotation.get("analysis")
-        if not isinstance(analysis, str):
-            return False
-        return self.ANALYSIS_TAG_PATTERN.match(analysis) is not None
+        with self.config.output_path.open("w", encoding="utf-8") as handle:
+            for output_record in final_outputs:
+                handle.write(json.dumps(output_record, ensure_ascii=False) + "\n")
 
     def run(self) -> None:
         records = self.load_records()
@@ -149,94 +322,11 @@ class BaseAnnotator(ABC):
         asyncio.run(self._run_async(selected_records))
 
 
-def parse_api_keys(value: Optional[str]) -> List[str]:
-    if value:
-        return [item.strip() for item in value.split(",") if item.strip()]
-    env_value = (
-        os.getenv("MM_API_KEYS")
-        or os.getenv("API_KEYS")
-        or os.getenv("OPENAI_API_KEY")
-    )
-    if not env_value:
-        raise ValueError("API keys not provided. Use --api-keys or set MM_API_KEYS/API_KEYS.")
-    return [item.strip() for item in env_value.split(",") if item.strip()]
-
-
-def _first_value(record: Dict[str, Any], keys: Sequence[str]) -> Optional[Any]:
-    for key in keys:
-        if key in record and record[key] not in (None, ""):
-            return record[key]
-    return None
-
 
 class MetMemeAnnotator(BaseAnnotator):
-    EMOTION_OPTIONS = [
-        "happiness",
-        "love",
-        "anger",
-        "sorrow",
-        "fear",
-        "hate",
-        "surprise",
-        "neutral",
-    ]
-    DEFAULT_PROBLEM = "What metaphor is shown in this image, and which emotion category best matches its implied meaning?"
-
-    SYSTEM_PROMPT = (
-        "You are an expert metaphorical image emotion analysis assistant specialized in creating natural, "
-        "flowing Chain of Thought reasoning.\n\n"
-        "You will be given:\n"
-        "- A question about the metaphor and emotion in one image\n"
-        "- Answer options with emotion categories\n"
-        "- The correct answer\n"
-        "- Key fields: is_metaphor, metaphor_path, text, emotion_type, caption\n\n"
-        "Your task:\n"
-        "- Analyze the image using provided key fields.\n"
-        "- Use this exact tag order in your reasoning output:\n"
-        "  1) <caption></caption>: initial visual perception only, no metaphor or emotion analysis.\n"
-        "  2) <metaphor></metaphor>: check whether metaphor exists based on the provided information; if yes, explain the understanding path using the pathway definitions above and keep it consistent with the given metaphor_path when provided.\n"
-        "Metaphor comprehension pathways:\n"
-        "- direct: The image employs common idioms or fixed expressions, or its metaphor can be recognized at a glance without additional interpretation.\n"
-        "- sequential: When reading the text sequentially and viewing the image, one first perceives the literal meaning of the picture. However, upon integrating the context and the content of the image, this literal meaning is revealed to be incorrect, and a cognitive shift is required to truly grasp the metaphorical meaning it conveys.\n"
-        "- parallel: After examining the entire image, both its metaphorical and literal meanings are quite common, with roughly equal weight in comprehension. Unlike direct expressions, which only evoke one meaning (for instance, one does not think of the literal meaning when using an idiom).\n\n"
-        "  3) <think></think>: deeper reasoning that combines visual clues and metaphor judgment.\n"
-        "  4) <answer></answer>: final answer as one emotion label from options.\n"
-        "- Keep the reasoning natural and conversational, but concise and evidence-based.\n"
-        "- Use English only.\n\n"
-        "Example Output Style:\n"
-        "<caption>In the top panel, a monkey is thoughtfully selecting one of several ropes to climb on in a forest. In the bottom panel, a human is in a subway station, pointing at a subway map as if choosing a route or getting information.</caption>\n"
-        "<metaphor>There is a metaphor, and the path is parallel. Both scenes show route selection in different "
-        "worlds, linking animal movement and urban navigation. Literal and metaphorical readings are both common "
-        "and equally salient.</metaphor>\n"
-        "<think>The focus is comparison, not emotional drama. Both figures look focused and calm, with no strong "
-        "signals of joy, fear, anger, or sadness. So neutral fits best.</think>\n"
-        "<answer>neutral</answer>\n\n"
-        "Output JSON only in this format, and donot output any other tags:\n"
-        "{\"analysis\": \"<caption>...</caption>\\n<metaphor>...</metaphor>\\n<think>...</think>\\n<answer>...</answer>\"}"
-    )
-
-    USER_PROMPT_TEMPLATE = (
-        "Question: {problem}\n\n"
-        "Answer Options:\n"
-        "{options_text}\n\n"
-        "Correct Answer: {correct_answer}\n\n"
-        "Known Fields:\n"
-        "- is_metaphor: {is_metaphor}\n"
-        "- metaphor_path: {metaphor_path}\n"
-        "- text: {text}\n"
-        "- emotion_type: {emotion_type}\n"
-        "- caption: {caption}\n\n"
-        "Task: Generate a natural, conversational reasoning process for metaphorical emotion analysis. "
-        "Use exactly these tags in order: <caption>, <metaphor>, <think>, <answer>."
-    )
-
     def __init__(self, *args, image_root: Optional[Path] = None, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.image_root = Path(image_root) if image_root else None
-
-    @property
-    def system_prompt(self) -> str:
-        return self.SYSTEM_PROMPT
 
     def resolve_image_path(self, record: Dict[str, Any]) -> Optional[Path]:
         image_value = _first_value(
@@ -250,86 +340,173 @@ class MetMemeAnnotator(BaseAnnotator):
             image_path = self.image_root / image_path
         return image_path
 
-    def extract_text(self, record: Dict[str, Any]) -> str:
-        value = _first_value(record, ["text", "Text"])
-        return str(value) if value is not None else ""
+    def build_known_fields(self, record: Dict[str, Any]) -> str:
+        text = _first_value(record, ["text", "Text"]) or ""
+        is_metaphor_value = bool(record.get("is_metaphor", False))
+        metaphor_path = _stringify_value(record.get("metaphor_path", ""))
+        emotion_type = _stringify_value(record.get("emotion_type", ""))
+        caption = _stringify_value(record.get("caption", ""))
+        text_value = _stringify_value(text)
+        metaphor_sentence = (
+            "This image is a metaphorical image.\n"
+            if is_metaphor_value
+            else "This image does not contain metaphorical content.\n"
+        )
+        metaphor_path_sentence = (
+            f"The metaphor understand path is {metaphor_path}.\n"
+            if is_metaphor_value
+            else ""
+        )
+        return (
+            f"{metaphor_sentence}\n"
+            f"The image's visual content is: {caption}\n"
+            f"The text appearing in the image is: {text_value}.\n"
+            f"{metaphor_path_sentence}"
+        )
 
-    def _format_options_text(self, options: Any) -> str:
-        if isinstance(options, dict):
-            items = [(str(k), str(v)) for k, v in options.items()]
-        elif isinstance(options, list):
-            labels = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-            items = [(labels[idx], str(v)) for idx, v in enumerate(options) if idx < len(labels)]
+
+class CIIBenchAnnotator(BaseAnnotator):
+    EMOTION_OPTIONS = ["positive", "negative", "neutral"]
+
+    def emotion_options(self) -> Sequence[str]:
+        return self.EMOTION_OPTIONS
+
+    def build_known_fields(self, record: Dict[str, Any]) -> str:
+        extra = record.get("extra_info") or {}
+        is_metaphor = _stringify_value(record.get("is_metaphor", ""))
+        metaphor_path = _stringify_value(record.get("metaphor_path", ""))
+        emotion_type = _stringify_value(record.get("emotion_type", ""))
+        caption = _stringify_value(record.get("caption", ""))
+        explanation = _stringify_value(extra.get("explanation", ""))
+        metaphorical_meaning = _stringify_value(extra.get("metaphorical_meaning", ""))
+        return (
+            f"This image is a metaphorical image.\n"
+            f"The image's visual content is: {caption}\n"
+            f"Its metaphor understanding path is {metaphor_path}.\n"
+            f"Here is an explanation of the metaphorical content in the image: {explanation}\n"
+            f"The intended metaphorical meaning is: {metaphorical_meaning}.\n"
+        )
+
+
+class ImageMetAnnotator(BaseAnnotator):
+    def build_known_fields(self, record: Dict[str, Any]) -> str:
+        extra = record.get("extra_info") or {}
+        source = _stringify_value(extra.get("source", ""))
+        target = _stringify_value(extra.get("target", ""))
+        linguistic_metaphor = _stringify_value(extra.get("generated_linguistic_metaphor", ""))
+        entailing_literal = _stringify_value(extra.get("entailing_literal", ""))
+        literal_description = _stringify_value(extra.get("literal_description", ""))
+        objects = _stringify_value(extra.get("objects", ""))
+        properties = _stringify_value(extra.get("properties", ""))
+        relations = _stringify_value(extra.get("relations", ""))
+        return (
+            f"This image is a metaphorical image.\n"
+            f"The image's visual content is: {_stringify_value(record.get('caption', ''))}\n"
+            f"Its metaphor understanding path is {_stringify_value(record.get('metaphor_path', ''))}.\n"
+            f"In this metaphor, the source domain is: {source}.\n"
+            f"The target domain is: {target}.\n"
+            f"The linguistic metaphor meaning is: {linguistic_metaphor}. {entailing_literal}\n"
+            f"The description of the situation is: {literal_description}.\n"
+            f"The key objects involved are: {objects}.\n"
+            f"The important properties highlighted by the metaphor are: {properties}.\n"
+            f"The important relations between the objects are: {relations}.\n"
+        )
+
+
+class MemeCapAnnotator(BaseAnnotator):
+    EXCLUDED_EXTRA_KEYS = {"img_captions"}
+
+    def build_known_fields(self, record: Dict[str, Any]) -> str:
+        extra = record.get("extra_info") or {}
+        meme_captions_value = extra.get("meme_captions", "")
+        if isinstance(meme_captions_value, list):
+            meme_captions = " ".join(
+                str(item).strip() for item in meme_captions_value if str(item).strip()
+            )
         else:
-            items = [(label, emotion) for label, emotion in zip("ABCDEFGH", self.EMOTION_OPTIONS)]
-        if not items:
-            items = [(label, emotion) for label, emotion in zip("ABCDEFGH", self.EMOTION_OPTIONS)]
-        return "\n".join(f"{label}. {value}" for label, value in items)
-
-    def build_prompt_text(self, record: Dict[str, Any]) -> str:
-        text = self.extract_text(record)
-        emotion_type = record.get("emotion_type") or ""
-        is_metaphor = record.get("is_metaphor", "")
-        metaphor_path = record.get("metaphor_path", "")
-        caption = record.get("caption", "")
-        problem = str(record.get("problem", "")).strip() or self.DEFAULT_PROBLEM
-        options_text = self._format_options_text(record.get("options"))
-
-        return self.USER_PROMPT_TEMPLATE.format(
-            problem=problem,
-            options_text=options_text,
-            correct_answer=emotion_type,
-            is_metaphor=is_metaphor,
-            metaphor_path=metaphor_path,
-            text=text,
-            emotion_type=emotion_type,
-            caption=caption,
-        ).strip()
-
-    def build_prompt(self, record: Dict[str, Any]) -> Union[str, List[Dict[str, Any]]]:
-        prompt_text = self.build_prompt_text(record)
-        return prompt_text
-
-    def build_output_record(self, record: Dict[str, Any], annotation: Dict[str, Any]) -> Dict[str, Any]:
-        output = dict(record)
-        output["think"] = annotation.get("analysis", "")
-        return output
-
-    def handle_error_record(self, record: Dict[str, Any], response: str) -> Dict[str, Any]:
-        output = dict(record)
-        output["annotation_error"] = "parse_failed"
-        output["raw_response"] = response
-        return output
+            meme_captions = _stringify_value(meme_captions_value)
+        return (
+            f"This image is a metaphorical image.\n"
+            f"The image's visual content is: {_stringify_value(record.get('caption', ''))}\n"
+            f"Its metaphor understanding path is {_stringify_value(record.get('metaphor_path', ''))}.\n"
+            f"Explanation of the implied meaning of the meme: {meme_captions}.\n"
+        )
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Annotate MultiMeme (stage 2: chain-of-thought).")
-    parser.add_argument("--input", required=True, help="Input JSONL path (stage1 output)")
-    parser.add_argument("--output", required=True, help="Output JSONL path")
-    parser.add_argument("--image-root", default=None, help="Deprecated. COT generation now uses text-only prompts.")
-    parser.add_argument("--model", required=True, help="Model name")
-    parser.add_argument("--api-keys", default=None, help="Comma-separated API keys")
-    parser.add_argument("--max-concurrent", type=int, default=50, help="Max concurrent requests per key")
-    parser.add_argument("--max-retries", type=int, default=5, help="Max retries per request")
-    parser.add_argument("--start", type=int, default=1, help="Start record index (1-based, inclusive)")
-    parser.add_argument("--end", type=int, default=None, help="End record index (1-based, inclusive)")
+class VFluteAnnotator(BaseAnnotator):
+    def build_known_fields(self, record: Dict[str, Any]) -> str:
+        extra = record.get("extra_info") or {}
+        return (
+            f"This image is a metaphorical image.\n"
+            f"The image's visual content is: {_stringify_value(record.get('caption', ''))}\n"
+            f"Its metaphor understanding path is {_stringify_value(record.get('metaphor_path', ''))}.\n"
+            f"Here is an explanation that may help you understand the metaphorical content in the image: "
+            f"{_stringify_value(extra.get('explanation', ''))}.\n"
+        )
 
-    args = parser.parse_args()
+
+ANNOTATOR_REGISTRY = {
+    "metmeme": MetMemeAnnotator,
+    "ciibench": CIIBenchAnnotator,
+    "imagemet": ImageMetAnnotator,
+    "memecap": MemeCapAnnotator,
+    "vflute": VFluteAnnotator,
+}
+
+
+def run(
+    dataset: str,
+    input: str,
+    output: str,
+    model: str,
+    api_keys: Optional[str] = None,
+    max_concurrent: int = 50,
+    max_retries: int = 5,
+    start: int = 1,
+    end: Optional[int] = None,
+    limit: int = 0,
+    image_root: Optional[str] = None,
+) -> None:
+    """Generate chain-of-thought annotations for a supported dataset.
+
+    Args:
+        dataset: One of metmeme, ciibench, imagemet, memecap, vflute.
+        input: Input JSONL path (stage1 output).
+        output: Output JSONL path.
+        model: Model name.
+        api_keys: Comma-separated API keys. Falls back to MM_API_KEYS/API_KEYS/OPENAI_API_KEY.
+        max_concurrent: Max concurrent requests per key.
+        max_retries: Max retries per request.
+        start: Start record index (1-based, inclusive).
+        end: End record index (1-based, inclusive). None means end of file.
+        limit: Max number of input records to load before range selection.
+        image_root: Only used by metmeme to resolve relative image paths.
+    """
+    dataset_key = dataset.lower()
+    if dataset_key not in ANNOTATOR_REGISTRY:
+        raise ValueError(
+            f"Unknown dataset '{dataset}'. Choose from: {sorted(ANNOTATOR_REGISTRY)}"
+        )
 
     config = AnnotatorConfig(
-        input_path=Path(args.input),
-        output_path=Path(args.output),
-        model_name=args.model,
-        api_keys=parse_api_keys(args.api_keys),
-        max_concurrent_per_key=args.max_concurrent,
-        max_retries=args.max_retries,
-        start_index=args.start,
-        end_index=args.end,
+        input_path=Path(input),
+        output_path=Path(output),
+        model_name=model,
+        api_keys=parse_api_keys(api_keys),
+        max_concurrent_per_key=max_concurrent,
+        max_retries=max_retries,
+        start_index=start,
+        end_index=end,
+        limit=limit,
     )
 
-    annotator = MetMemeAnnotator(config, image_root=args.image_root)
+    annotator_cls = ANNOTATOR_REGISTRY[dataset_key]
+    if annotator_cls is MetMemeAnnotator:
+        annotator = annotator_cls(config, image_root=image_root)
+    else:
+        annotator = annotator_cls(config)
     annotator.run()
 
 
 if __name__ == "__main__":
-    main()
+    fire.Fire(run)
