@@ -29,16 +29,21 @@ class AnnotatorConfig:
     limit: int = 0
 
 
-def parse_api_keys(value: Optional[str]) -> List[str]:
+def parse_api_keys(value: Optional[str], model_name: str = "") -> List[str]:
     if value:
         return [item.strip() for item in value.split(",") if item.strip()]
-    env_value = (
-        os.getenv("MM_API_KEYS")
-        or os.getenv("API_KEYS")
-        or os.getenv("OPENAI_API_KEY")
+
+    preferred = (
+        ["GEMINI_API_KEYS", "MM_API_KEYS", "API_KEYS", "OPENAI_API_KEY"]
+        if model_name.lower().startswith("gemini")
+        else ["MM_API_KEYS", "API_KEYS", "OPENAI_API_KEY", "GEMINI_API_KEYS"]
     )
+    env_value = next((os.getenv(name) for name in preferred if os.getenv(name)), None)
     if not env_value:
-        raise ValueError("API keys not provided. Use --api_keys or set MM_API_KEYS/API_KEYS.")
+        raise ValueError(
+            "API keys not provided. Use --api_keys or set "
+            "MM_API_KEYS / GEMINI_API_KEYS / API_KEYS."
+        )
     return [item.strip() for item in env_value.split(",") if item.strip()]
 
 
@@ -492,7 +497,7 @@ def run(
         input_path=Path(input),
         output_path=Path(output),
         model_name=model,
-        api_keys=parse_api_keys(api_keys),
+        api_keys=parse_api_keys(api_keys, model_name=model),
         max_concurrent_per_key=max_concurrent,
         max_retries=max_retries,
         start_index=start,

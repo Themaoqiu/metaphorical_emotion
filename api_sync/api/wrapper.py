@@ -37,22 +37,62 @@ class QAWrapper:
             or os.getenv("VIDEO_API_BASE_URL")
             or "https://dashscope.aliyuncs.com/compatible-mode/v1"
         )
-        
+
+        default_headers = self._load_default_headers()
+
         logger.info(f"Initializing QAWrapper")
         logger.info(f"  API Base URL: {api_base_url}")
         logger.info(f"  Model: {model_name}")
         logger.info(f"  API Key: {api_key[:20]}...")
-        
-        self.client = AsyncOpenAI(
-            api_key=api_key,
-            base_url=api_base_url
-        )
+        if default_headers:
+            logger.info(f"  Default headers: {list(default_headers.keys())}")
+
+        client_kwargs: Dict[str, Any] = {
+            "api_key": api_key,
+            "base_url": api_base_url,
+        }
+        if default_headers:
+            client_kwargs["default_headers"] = default_headers
+
+        self.client = AsyncOpenAI(**client_kwargs)
 
         self.stats = {
             "calls": 0,
             "errors": 0,
             "retries": 0
         }
+
+    @staticmethod
+    def _load_default_headers() -> Dict[str, str]:
+        """Collect optional default HTTP headers from the environment.
+
+        Supports two mechanisms, both opt-in (no effect when unset):
+          * ``MM_DEFAULT_HEADERS`` — a JSON object of arbitrary headers.
+          * ``MM_USER_EMAIL`` / ``MM_APP_ID`` — convenience vars for the
+            MAAS-style ``x-maas-user-email`` / ``x-maas-app-id`` headers.
+        """
+        headers: Dict[str, str] = {}
+
+        raw = os.getenv("MM_DEFAULT_HEADERS")
+        if raw:
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    headers.update({str(k): str(v) for k, v in parsed.items()})
+                else:
+                    logger.warning("MM_DEFAULT_HEADERS must be a JSON object; ignored")
+            except json.JSONDecodeError as exc:
+                logger.warning(f"Failed to parse MM_DEFAULT_HEADERS as JSON: {exc}")
+
+        user_email = os.getenv("MM_USER_EMAIL")
+        if user_email:
+            headers.setdefault("x-maas-user-email", user_email)
+
+        app_id = os.getenv("MM_APP_ID")
+        if app_id:
+            headers.setdefault("x-maas-app-id", app_id)
+
+        return headers
 
     async def qa(self, system_prompt: str, user_prompt: str = "", rational: bool = False) -> Any:
         """

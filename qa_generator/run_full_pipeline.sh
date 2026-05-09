@@ -9,12 +9,12 @@ set -a
 source "$REPO_ROOT/.env"
 set +a
 
-CAPTION_MODEL="qwen3.5-plus"
-META_MODEL="qwen3.5-plus"
+CAPTION_MODEL="gemini-3-flash"
+META_MODEL="gemini-3-flash"
 COT_MODEL="deepseek-v3.2"
 MAX_CONCURRENT=50
 MAX_RETRIES=5
-LIMIT=1
+LIMIT=0
 
 run_caption() {
   local dataset="$1"
@@ -84,7 +84,7 @@ run_cot() {
   fi
 }
 
-
+# Modify the path to the locally downloaded Sakigo/MetaThinker-data dataset on your machine before running
 CIIBENCH_INPUT="/home/wangxingjian/data/metaphor/CII-Bench/ciibench.jsonl"
 CIIBENCH_IMAGE_ROOT="/home/wangxingjian/data/metaphor/CII-Bench/images"
 CIIBENCH_WORK_FILE="/home/wangxingjian/MetaThinker/output/ciibench_full.jsonl"
@@ -105,23 +105,23 @@ VFLUTE_INPUT="/home/wangxingjian/data/metaphor/V-FLUTE/vflute_full.jsonl"
 VFLUTE_IMAGE_ROOT="/home/wangxingjian/data/metaphor/V-FLUTE/images"
 VFLUTE_WORK_FILE="/home/wangxingjian/MetaThinker/output/vflute_full.jsonl"
 
-# run_caption "ciibench" "$CIIBENCH_INPUT" "$CIIBENCH_WORK_FILE" "$CIIBENCH_IMAGE_ROOT"
-# run_cot "ciibench" "$CIIBENCH_WORK_FILE" "$CIIBENCH_WORK_FILE"
+run_caption "ciibench" "$CIIBENCH_INPUT" "$CIIBENCH_WORK_FILE" "$CIIBENCH_IMAGE_ROOT"
+run_cot "ciibench" "$CIIBENCH_WORK_FILE" "$CIIBENCH_WORK_FILE"
 
-# run_caption "imagemet" "$IMAGEMET_INPUT" "$IMAGEMET_WORK_FILE" "$IMAGEMET_IMAGE_ROOT"
-# run_meta "imagemet" "$IMAGEMET_WORK_FILE" "$IMAGEMET_WORK_FILE" "$IMAGEMET_IMAGE_ROOT"
-# run_cot "imagemet" "$IMAGEMET_WORK_FILE" "$IMAGEMET_WORK_FILE"
+run_caption "imagemet" "$IMAGEMET_INPUT" "$IMAGEMET_WORK_FILE" "$IMAGEMET_IMAGE_ROOT"
+run_meta "imagemet" "$IMAGEMET_WORK_FILE" "$IMAGEMET_WORK_FILE" "$IMAGEMET_IMAGE_ROOT"
+run_cot "imagemet" "$IMAGEMET_WORK_FILE" "$IMAGEMET_WORK_FILE"
 
-# run_caption "memecap" "$MEMECAP_INPUT" "$MEMECAP_WORK_FILE" "$MEMECAP_IMAGE_ROOT"
-# run_meta "memecap" "$MEMECAP_WORK_FILE" "$MEMECAP_WORK_FILE" "$MEMECAP_IMAGE_ROOT"
-# run_cot "memecap" "$MEMECAP_WORK_FILE" "$MEMECAP_WORK_FILE"
+run_caption "memecap" "$MEMECAP_INPUT" "$MEMECAP_WORK_FILE" "$MEMECAP_IMAGE_ROOT"
+run_meta "memecap" "$MEMECAP_WORK_FILE" "$MEMECAP_WORK_FILE" "$MEMECAP_IMAGE_ROOT"
+run_cot "memecap" "$MEMECAP_WORK_FILE" "$MEMECAP_WORK_FILE"
 
 run_caption "metmeme" "$METMEME_INPUT" "$METMEME_WORK_FILE" "$METMEME_IMAGE_ROOT"
 run_meta "metmeme" "$METMEME_WORK_FILE" "$METMEME_WORK_FILE" "$METMEME_IMAGE_ROOT"
 run_cot "metmeme" "$METMEME_WORK_FILE" "$METMEME_WORK_FILE" "$METMEME_IMAGE_ROOT"
 
-# run_caption "vflute" "$VFLUTE_INPUT" "$VFLUTE_WORK_FILE" "$VFLUTE_IMAGE_ROOT"
-# run_meta "vflute" "$VFLUTE_WORK_FILE" "$VFLUTE_WORK_FILE" "$VFLUTE_IMAGE_ROOT"
-# run_cot "vflute" "$VFLUTE_WORK_FILE" "$VFLUTE_WORK_FILE"
+run_caption "vflute" "$VFLUTE_INPUT" "$VFLUTE_WORK_FILE" "$VFLUTE_IMAGE_ROOT"
+run_meta "vflute" "$VFLUTE_WORK_FILE" "$VFLUTE_WORK_FILE" "$VFLUTE_IMAGE_ROOT"
+run_cot "vflute" "$VFLUTE_WORK_FILE" "$VFLUTE_WORK_FILE"
 
 echo "[pipeline] all datasets completed"

@@ -1,5 +1,49 @@
 # Metaphorical Emotion
 
+## Annotator
+
+1. Download original image
+    ```bash
+    hf download Sakigo/MetaThinker-dataset --repo-type dataset --local-dir /path/to/data/MetaThinker-dataset
+    ```
+
+2. Configure API
+    ```bash
+    git clone https://github.com/Themaoqiu/metaphorical_emotion.git
+    cd metaphorical_emotion
+    touch .env
+    ```
+
+    Internal dedicated API .env content:
+    ```bash
+    # DeepSeek via MAAS
+    MM_API_KEYS=""
+    MM_API_BASE_URL=""
+    MM_USER_EMAIL=""
+    MM_APP_ID=""
+
+    # Gemini via Runway
+    GEMINI_API_KEYS="<runway api-key>"
+    GEMINI_API_BASE_URL=""
+    ```
+
+    Common Openai API .env content:
+    ```bash
+    MM_API_KEYS=""
+    VISION_API_BASE_URL=""
+    ```
+
+3. Install dependencies
+    ```bash
+    cd metaphorical_emotion
+    uv sync
+    ```
+
+4. Run annotation, Modify the path to the locally downloaded [Sakigo/MetaThinker-data](https://huggingface.co/datasets/Sakigo/MetaThinker-data) dataset on your machine before running
+    ```bash
+    bash qa_generator/run_full_pipeline.sh
+    ```
+
 ## Evaluation
 
 Support datasets:
