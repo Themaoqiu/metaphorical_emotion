@@ -4,7 +4,7 @@
 
 1. Download original image
     ```bash
-    hf download Sakigo/MetaThinker-dataset --repo-type dataset --local-dir /path/to/data/MetaThinker-dataset
+    hf download Sakigo/MetaThinker-data --repo-type dataset --local-dir /path/to/data/MetaThinker-dataset
     ```
 
 2. Configure API

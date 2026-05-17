@@ -17,7 +17,7 @@ MAX_RETRIES=5
 LIMIT=0
 
 run_caption() {
-  local dataset="$1"
+  local dataset="$1"  
   local input_path="$2"
   local output_path="$3"
   local image_root="$4"
