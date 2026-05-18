@@ -5,26 +5,24 @@
 # weight_decay=0.01, 2 epochs).
 
 set -x
+export CUDA_VISIBLE_DEVICES=2,3
+export RAY_local_fs_capacity_threshold=0.999
+export BAD_SAMPLES_LOG=./checkpoints/qwen3_vl/bad_samples.txt
 
-MODEL_PATH=Qwen/Qwen3-VL-7B-Instruct
+MODEL_PATH=qwen3_vl_8b_instruct
 
 # 1) Build train/val splits from the raw jsonl (only needs to run once).
 #    Pass multiple files to --inputs to mix datasets (yesbut + hummus + metmeme, …).
 
 if [ ! -f data/emotion_grpo/train.jsonl ]; then
     python3 examples/prepare_emotion.py \
-        --inputs \
-            imagemet.jsonl \
-            memecap.jsonl \
-            metmeme.jsonl \
-            vflute.jsonl \
+        --inputs /home/wangxingjian/data/vflute.jsonl \
         --out_dir data/emotion_grpo \
-        --val_ratio 0.05
+        --val_ratio 0
 fi
 
 # 2) Launch GRPO.
 python3 -m verl.trainer.main \
     config=examples/emotion_grpo.yaml \
     worker.actor.model.model_path=${MODEL_PATH} \
-    trainer.experiment_name=qwen3_vl_yesbut_grpo \
-    trainer.n_gpus_per_node=8
+    trainer.n_gpus_per_node=2

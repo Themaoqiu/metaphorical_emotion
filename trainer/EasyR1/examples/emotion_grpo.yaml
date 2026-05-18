@@ -2,7 +2,7 @@ data:
   # RLHFDataset also supports comma-separated paths (multi-file concat) directly,
   # e.g. ./data/yesbut_full.jsonl,./data/hummus_full.jsonl,./data/metmeme_full.jsonl
   train_files: ./data/emotion_grpo/train.jsonl
-  val_files: ./data/emotion_grpo/val.jsonl
+  val_files: ./data/emotion_grpo/train.jsonl
   prompt_key: prompt
   answer_key: answer
   image_key: images
@@ -12,10 +12,10 @@ data:
   image_dir: null
   video_fps: 2.0
   max_prompt_length: 16384
-  max_response_length: 1024
-  rollout_batch_size: 64
+  max_response_length: 8192
+  rollout_batch_size: 2
   mini_rollout_batch_size: null
-  val_batch_size: 64
+  val_batch_size: 1
   format_prompt: ./examples/format_prompt/emotion_user.jinja
   system_prompt: ./examples/format_prompt/emotion_system.jinja
   override_chat_template: null
@@ -38,7 +38,7 @@ algorithm:
 
 worker:
   actor:
-    global_batch_size: 8
+    global_batch_size: 1
     micro_batch_size_per_device_for_update: 1
     micro_batch_size_per_device_for_experience: 1
     max_grad_norm: 5.0
@@ -46,7 +46,7 @@ worker:
     dynamic_batching: true
     ulysses_size: 1
     model:
-      model_path: Qwen/Qwen3-VL-7B-Instruct
+      model_path: Qwen/Qwen3-VL-8B-Instruct
       enable_gradient_checkpointing: true
       trust_remote_code: false
       freeze_vision_tower: false
@@ -70,6 +70,7 @@ worker:
 
   rollout:
     n: 8
+    max_num_batched_tokens: 24576
     temperature: 1.0
     top_p: 1.0
     limit_images: 1
@@ -97,14 +98,14 @@ worker:
 trainer:
   total_epochs: 2
   max_steps: null
-  project_name: metaphorical_emotion
-  experiment_name: qwen3_vl_yesbut_grpo
+  project_name: MetaThinker
+  experiment_name: qwen3_vl_grpo
   logger: ["file"]
   nnodes: 1
-  n_gpus_per_node: 8
+  n_gpus_per_node: 2
   max_try_make_batch: 20
-  val_freq: 50
-  val_before_train: true
+  val_freq: -1
+  val_before_train: false
   val_only: false
   val_generations_to_log: 3
   save_freq: 500

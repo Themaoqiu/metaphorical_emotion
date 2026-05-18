@@ -2,8 +2,8 @@
 #
 # Format reward: response must contain <caption>...</caption>, <metaphor>...</metaphor>,
 # <think>...</think>, <answer>...</answer> tags in order, each appearing exactly once.
-# Accuracy reward: predicted emotion (in <answer>) maps to the same sentiment polarity
-# (positive / negative / neutral) as the ground truth emotion label.
+# Accuracy reward: predicted emotion (in <answer>) must match the ground truth
+# emotion label exactly after light normalization.
 
 import re
 from typing import Any
@@ -13,10 +13,6 @@ REWARD_NAME = "emotion"
 REWARD_TYPE = "sequential"
 
 
-POSITIVE_EMOTIONS = {"happiness", "love", "surprise", "positive"}
-NEGATIVE_EMOTIONS = {"anger", "sorrow", "fear", "hate", "negative"}
-NEUTRAL_EMOTIONS = {"neutral"}
-
 _FORMAT_PATTERN = re.compile(
     r"^\s*<caption>.*?</caption>\s*<metaphor>.*?</metaphor>\s*<think>.*?</think>\s*<answer>.*?</answer>\s*$",
     re.DOTALL,
@@ -24,15 +20,8 @@ _FORMAT_PATTERN = re.compile(
 _TAGS = ("caption", "metaphor", "think", "answer")
 
 
-def _emotion_to_sentiment(text: str) -> str:
-    tokens = set(re.sub(r"[^a-z]+", " ", text.lower()).split())
-    if tokens & POSITIVE_EMOTIONS:
-        return "positive"
-    if tokens & NEGATIVE_EMOTIONS:
-        return "negative"
-    if tokens & NEUTRAL_EMOTIONS:
-        return "neutral"
-    return "unknown"
+def _normalize_emotion(text: str) -> str:
+    return " ".join(re.sub(r"[^a-z]+", " ", text.lower()).split())
 
 
 def format_reward(response: str) -> float:
@@ -50,9 +39,9 @@ def accuracy_reward(response: str, ground_truth: str) -> float:
     match = re.search(r"<answer>(.*?)</answer>", response, flags=re.DOTALL | re.IGNORECASE)
     if not match:
         return 0.0
-    pred = _emotion_to_sentiment(match.group(1))
-    gold = _emotion_to_sentiment(ground_truth)
-    if pred == "unknown" or gold == "unknown":
+    pred = _normalize_emotion(match.group(1))
+    gold = _normalize_emotion(ground_truth)
+    if not pred or not gold:
         return 0.0
     return 1.0 if pred == gold else 0.0
 
